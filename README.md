@@ -1,4 +1,4 @@
-# dataset chosen
+## dataset chosen
 **amazon-us-customer-reviews** - https://www.kaggle.com/datasets/cynthiarempel/amazon-us-customer-reviews-dataset
 
 # Information Retrieval (IR) Assignment 2 - Work Breakdown & Team Allocation
@@ -90,3 +90,25 @@ ir_assignment2_group_57/
     ├── ranker.py               # Person 2
     ├── recommenders.py         # Person 3
     └── evaluation.py           # Person 3
+
+---
+
+
+## Project Execution Roadmap
+
+* **Phase 1: Data & Schema Agreement**
+* Filter a clean subset of 20,000–50,000 reviews from 1–2 categories (e.g., Electronics or Books) to ensure optimal execution speeds within the Virtual Lab.
+* Standardize the core schema: `product_id`, `product_title`, `review_body`, `star_rating`, `user_id`, `category`.
+
+
+* **Phase 2: Independent Development**
+* Each member works on their assigned utility scripts and corresponding Streamlit multi-page file in `pages/`.
+
+
+* **Phase 3: Integration & Evaluation**
+* Connect search outputs and recommendations into Person 3's evaluation module to compute Precision, Recall, MAP, and NDCG.
+
+
+* **Phase 4: Lab Verification & Final Submission**
+* Run and test the complete `.py` workflow in the BITS Virtual Lab environment.
+* Capture demo recordings/screenshots and compile the final report with all Section G inferences.
