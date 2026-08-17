@@ -105,26 +105,85 @@ st.title("Search Engine & Graph Ranking")
 
 @st.cache_resource
 def load_and_index():
-    df = pd.read_csv("data/sample_amazon_reviews.csv").dropna()
-    
+    df = read_csv().dropna(subset=["product_id", "review_body", "customer_id"])
+
     idx = InvertedIndex()
     idx.build_index(df)
-    
+
     ranker = GraphRanker()
     ranker.build_co_review_graph(df)
     pr_scores = ranker.compute_pagerank()
-    
-    return idx, pr_scores
+    hubs, auth_scores = ranker.compute_hits()
 
-idx, pr_scores = load_and_index()
+    return idx, pr_scores, auth_scores, ranker.graph
+
+idx, pr_scores, auth_scores, graph = load_and_index()
+
+# Sidebar Control Settings
+st.sidebar.header("Ranking Controls")
+alpha = st.sidebar.slider(
+    "Relevance vs. Graph Weight (alpha)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.7,
+    help="1.0 = Pure BM25, 0.0 = Pure PageRank",
+)
+top_k = st.sidebar.slider("Top K Results", 5, 20, 10)
 
 query = st.text_input("Enter product search query:", "camera lens")
 
 if query:
-    st.subheader("BM25 Standard Search Results")
-    results = idx.search_bm25(query, top_k=5)
-    
-    for item, score in results:
-        pid = item['product_id']
-        pr = pr_scores.get(pid, 0.0)
-        st.write(f"**{item['product_title']}** | ID: `{pid}` | BM25 Score: {score:.4f} | PageRank: {pr:.6f}")
+    raw_results = idx.search_bm25(query, top_k=top_k * 2)
+
+    if not raw_results:
+        st.warning("No matching products found.")
+    else:
+        # Normalize BM25 and PageRank scores to [0, 1] for fair combination
+        max_bm25 = max(score for _, score in raw_results) or 1.0
+        max_pr = max(pr_scores.values()) if pr_scores else 1.0
+
+        combined_results = []
+        for item, bm25_score in raw_results:
+            pid = item["product_id"]
+            norm_bm25 = bm25_score / max_bm25
+            pr = pr_scores.get(pid, 0.0)
+            norm_pr = pr / max_pr
+            auth = auth_scores.get(pid, 0.0)
+
+            # Blended score computation
+            final_score = (alpha * norm_bm25) + ((1 - alpha) * norm_pr)
+
+            combined_results.append({
+                "title": item["product_title"],
+                "pid": pid,
+                "bm25": bm25_score,
+                "pagerank": pr,
+                "authority": auth,
+                "final_score": final_score,
+            })
+
+        # Sort by the blended score
+        combined_results = sorted(
+            combined_results, key=lambda x: x["final_score"], reverse=True
+        )[:top_k]
+
+        st.subheader("Ranked Search Results")
+
+        res_df = pd.DataFrame(combined_results)
+        st.dataframe(
+            res_df[[
+                "title",
+                "pid",
+                "final_score",
+                "bm25",
+                "pagerank",
+                "authority",
+            ]],
+            use_container_width=True,
+        )
+
+        # Graph Metrics Summary
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Graph Nodes (Products)", graph.number_of_nodes())
+        col2.metric("Graph Edges (Co-Reviews)", graph.number_of_edges())
+        col3.metric("Top Result PageRank", f"{combined_results[0]['pagerank']:.6f}")
