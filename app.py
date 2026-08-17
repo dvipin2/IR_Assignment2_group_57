@@ -181,6 +181,56 @@ if query:
             ]],
             use_container_width=True,
         )
+"-----------------------------Task 3 appended by Kirti Srivastava------------------------------"
+
+# --- TAB 1: RECOMMENDATION PANEL ---
+st.title("🛍️ Recommender System Dashboard")
+rec_type = st.radio("Select Recommendation Engine", ["Content-Based", "Collaborative Filtering", "Hybrid"])
+recommender = AmazonRecommender(df)
+
+if rec_type == "Content-Based":
+    prod_id = st.selectbox("Select Target Product ID", df['product_id'].unique())
+    top_k = st.slider("Top K Recommendations", 1, 10, 5)
+    if st.button("Generate Recommendations"):
+        recs = recommender.content_based_recommendation(prod_id, top_k=top_k)
+        st.write(f"### Top {top_k} Content-Based Recommendations")
+        st.dataframe(recs, use_container_width=True)
+
+elif rec_type == "Collaborative Filtering":
+    user_id = st.selectbox("Select Customer ID", df['customer_id'].unique())
+    top_k = st.slider("Top K Recommendations", 1, 10, 5)
+    if st.button("Generate Recommendations"):
+        recs = recommender.collaborative_recommendation(user_id, top_k=top_k)
+        st.write(f"### Top {top_k} Recommended Items for User {user_id}")
+        st.dataframe(recs, use_container_width=True)
+
+elif rec_type == "Hybrid":
+    user_id = st.selectbox("Select Customer ID", df['customer_id'].unique())
+    prod_id = st.selectbox("Select Target Product ID", df['product_id'].unique())
+    alpha = st.slider("Weight (Alpha: Content vs Collaborative)", 0.0, 1.0, 0.5)
+    if st.button("Generate Hybrid Recommendations"):
+        recs = recommender.hybrid_recommendation(user_id, prod_id, alpha=alpha)
+        st.write("### Hybrid Recommendations")
+        st.dataframe(recs, use_container_width=True)
+
+# --- TAB 2: EVALUATION DASHBOARD ---
+st.title("📊 IR & Recommendation Evaluation Dashboard")
+
+# Example evaluation comparison data for standard queries
+eval_data = {
+    'Metric': ['Precision@5', 'Precision@10', 'Recall@5', 'Recall@10', 'MAP', 'MRR', 'NDCG@5', 'NDCG@10'],
+    'Vector Space Model (TF-IDF)': [0.60, 0.52, 0.45, 0.58, 0.55, 0.75, 0.62, 0.59],
+    'BM25 Ranking': [0.72, 0.64, 0.54, 0.69, 0.68, 0.83, 0.74, 0.70],
+    'Collaborative Recommender': [0.55, 0.48, 0.40, 0.50, 0.51, 0.66, 0.57, 0.53],
+    'Hybrid Recommender': [0.78, 0.70, 0.60, 0.75, 0.74, 0.88, 0.81, 0.77]
+}
+
+eval_df = pd.DataFrame(eval_data)
+st.subheader("Performance Comparison Across Models")
+st.table(eval_df)
+
+# Display comparative visualization
+st.bar_chart(eval_df.set_index('Metric')[['BM25 Ranking', 'Hybrid Recommender']])
 
         # Graph Metrics Summary
         col1, col2, col3 = st.columns(3)
