@@ -1,257 +1,368 @@
-import pandas as pd
-import streamlit as st
+import hashlib
 import math
 import re
 from collections import defaultdict
-import networkx as nx
-from collections import defaultdict
-import hashlib
 from urllib.parse import urljoin, urlparse
-import requests
+
 from bs4 import BeautifulSoup
-import re
-from collections import Counter
+import networkx as nx
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import requests
+from scipy.sparse.linalg import svds
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from plotly import express as px
+from sklearn.metrics.pairwise import cosine_similarity
+import streamlit as st
 from wordcloud import WordCloud
 
+# Ensure NLTK data dependencies
+nltk.download("stopwords", quiet=True)
+nltk.download("wordnet", quiet=True)
 
-def read_csv():
-    """this data is already cleaned & mixed 
-    from the dataset downloaded from the kaggle.
-    This dataset contains camera and electronics for better 
-    diversity. you can always run the notebook 
-    and mix the data if you like. please save it in 
-    this data directory only."""
-    return pd.read_csv("data/sample_amazon_reviews.csv")
-
-
-class InvertedIndex:
-    def __init__(self):
-        self.index = defaultdict(list)
-        self.doc_lengths = {}
-        self.avg_doc_len = 0
-        self.corpus = {}
-
-    def _tokenize(self, text):
-        if not isinstance(text, str):
-            return []
-        text = re.sub(r'[^\w\s]', '', text.lower())
-        return text.split()
-
-    def build_index(self, df, id_col='product_id', text_col='review_body'):
-        total_len = 0
-        for idx, row in df.iterrows():
-            doc_id = row[id_col]
-            tokens = self._tokenize(str(row[text_col]))
-            
-            self.corpus[doc_id] = row.to_dict()
-            self.doc_lengths[doc_id] = len(tokens)
-            total_len += len(tokens)
-
-            # Store term frequencies
-            tf_counts = defaultdict(int)
-            for token in tokens:
-                tf_counts[token] += 1
-            
-            for token, count in tf_counts.items():
-                self.index[token].append((doc_id, count))
-                
-        self.avg_doc_len = total_len / max(len(df), 1)
-
-    def search_bm25(self, query, k1=1.5, b=0.75, top_k=10):
-        query_tokens = self._tokenize(query)
-        scores = defaultdict(float)
-        N = len(self.doc_lengths)
-
-        for token in query_tokens:
-            if token not in self.index:
-                continue
-            postings = self.index[token]
-            df = len(postings)
-            idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
-
-            for doc_id, tf in postings:
-                doc_len = self.doc_lengths[doc_id]
-                denom = tf + k1 * (1 - b + b * (doc_len / self.avg_doc_len))
-                scores[doc_id] += idf * ((tf * (k1 + 1)) / denom)
-
-        sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        return [(self.corpus[doc_id], score) for doc_id, score in sorted_docs]
-
-
-
-class GraphRanker:
-    def __init__(self):
-        self.graph = nx.DiGraph()
-
-    def build_co_review_graph(self, df):
-        """Creates directed product edges based on shared user reviews"""
-        user_to_products = defaultdict(set)
-        for _, row in df.iterrows():
-            user_to_products[row['customer_id']].add(row['product_id'])
-
-        # Edge from Product A -> Product B if same user reviewed both
-        for products in user_to_products.values():
-            prod_list = list(products)
-            for i in range(len(prod_list)):
-                for j in range(i + 1, len(prod_list)):
-                    self.graph.add_edge(prod_list[i], prod_list[j])
-                    self.graph.add_edge(prod_list[j], prod_list[i])
-
-    def compute_pagerank(self, alpha=0.85):
-        return nx.pagerank(self.graph, alpha=alpha) if len(self.graph) > 0 else {}
-
-    def compute_hits(self, max_iter=100):
-        if len(self.graph) == 0:
-            return {}, {}
-        hubs, authorities = nx.hits(self.graph, max_iter=max_iter)
-        return hubs, authorities
-
+# ------------------------------------------------------------------------------
+# 1. CORE ALGORITHMIC UTILITIES (Person 1, 2, & 3)
+# ------------------------------------------------------------------------------
 
 
 class SimpleCrawler:
 
-    def __init__(self, max_depth=2, max_pages=20):
-        self.max_depth = max_depth
-        self.max_pages = max_pages
-        self.visited_urls = set()
-        self.doc_hashes = set()
-        self.crawled_data = []
+  def __init__(self, max_depth=2, max_pages=15):
+    self.max_depth = max_depth
+    self.max_pages = max_pages
+    self.visited_urls = set()
+    self.doc_hashes = set()
+    self.crawled_data = []
 
-    def _get_hash(self, content):
-        return hashlib.md5(content.encode("utf-8")).hexdigest()
+  def _get_hash(self, content):
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
 
-    def crawl(self, seed_urls):
-        queue = [(url, 0) for url in seed_urls]
+  def crawl(self, seed_urls):
+    queue = [(url, 0) for url in seed_urls]
+    while queue and len(self.crawled_data) < self.max_pages:
+      url, depth = queue.pop(0)
+      if url in self.visited_urls or depth > self.max_depth:
+        continue
+      self.visited_urls.add(url)
+      try:
+        response = requests.get(
+            url,
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0 (IR_Assignment_Bot)"},
+        )
+        if response.status_code != 200:
+          continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        text_content = soup.get_text(separator=" ", strip=True)
+        doc_hash = self._get_hash(text_content)
+        if doc_hash in self.doc_hashes:
+          continue
+        self.doc_hashes.add(doc_hash)
 
-        while queue and len(self.crawled_data) < self.max_pages:
-            url, depth = queue.pop(0)
+        title = soup.title.string if soup.title else url
+        metadata = {
+            "url": url,
+            "title": title,
+            "depth": depth,
+            "domain": urlparse(url).netloc,
+        }
+        self.crawled_data.append(
+            {"metadata": metadata, "content": text_content}
+        )
 
-            if url in self.visited_urls or depth > self.max_depth:
-                continue
-
-            self.visited_urls.add(url)
-
-            try:
-                response = requests.get(
-                    url,
-                    timeout=5,
-                    headers={"User-Agent": "Mozilla/5.0 (IR_Assignment_Bot)"},
-                )
-                if response.status_code != 200:
-                    continue
-
-                soup = BeautifulSoup(response.text, "html.parser")
-
-                # Extract raw text & check for document duplicates
-                text_content = soup.get_text(separator=" ", strip=True)
-                doc_hash = self._get_hash(text_content)
-
-                if doc_hash in self.doc_hashes:
-                    continue  # Skip duplicate document content
-                self.doc_hashes.add(doc_hash)
-
-                # Store metadata separately from raw document text
-                title = soup.title.string if soup.title else url
-                metadata = {
-                    "url": url,
-                    "title": title,
-                    "depth": depth,
-                    "domain": urlparse(url).netloc,
-                }
-
-                self.crawled_data.append({
-                    "metadata": metadata,
-                    "content": text_content,
-                })
-
-                # Extract sub-links for deeper crawling
-                if depth < self.max_depth:
-                    for link in soup.find_all("a", href=True):
-                        next_url = urljoin(url, link["href"])
-                        if (
-                            next_url.startswith("http")
-                            and next_url not in self.visited_urls
-                        ):
-                            queue.append((next_url, depth + 1))
-
-            except Exception:
-                continue
-
-        return self.crawled_data
-
-
-# Ensure NLTK resources are available
-nltk.download("stopwords", quiet=True)
-nltk.download("wordnet", quiet=True)
+        if depth < self.max_depth:
+          for link in soup.find_all("a", href=True):
+            next_url = urljoin(url, link["href"])
+            if (
+                next_url.startswith("http")
+                and next_url not in self.visited_urls
+            ):
+              queue.append((next_url, depth + 1))
+      except Exception:
+        continue
+    return self.crawled_data
 
 
 class TextMiner:
 
-    def __init__(self):
-        self.stop_words = set(stopwords.words("english"))
-        self.lemmatizer = WordNetLemmatizer()
+  def __init__(self):
+    self.stop_words = set(stopwords.words("english"))
+    self.lemmatizer = WordNetLemmatizer()
 
-    def preprocess(self, text, use_lemmatization=True):
-        if not isinstance(text, str):
-            return ""
-        # Lowercase and remove special characters/punctuation
-        text = re.sub(r"[^\w\s]", "", text.lower())
-        tokens = text.split()
+  def preprocess(self, text, use_lemmatization=True):
+    if not isinstance(text, str):
+      return ""
+    text = re.sub(r"[^\w\s]", "", text.lower())
+    tokens = text.split()
+    tokens = [w for w in tokens if w not in self.stop_words and len(w) > 2]
+    if use_lemmatization:
+      tokens = [self.lemmatizer.lemmatize(w) for w in tokens]
+    return " ".join(tokens)
 
-        # Stop-word removal
-        tokens = [w for w in tokens if w not in self.stop_words and len(w) > 2]
+  def get_top_ngrams(self, corpus, n=2, top_k=15):
+    vec = CountVectorizer(ngram_range=(n, n), stop_words="english").fit(corpus)
+    bag_of_words = vec.transform(corpus)
+    sum_words = bag_of_words.sum(axis=0)
+    words_freq = [
+        (word, sum_words[0, idx]) for word, idx in vec.vocabulary_.items()
+    ]
+    words_freq = sorted(words_freq, key=lambda x: x[1], reverse=True)
+    return pd.DataFrame(words_freq[:top_k], columns=["ngram", "frequency"])
 
-        # Optional Lemmatization
-        if use_lemmatization:
-            tokens = [self.lemmatizer.lemmatize(w) for w in tokens]
+  def extract_tfidf_features(self, corpus, max_features=20):
+    tfidf = TfidfVectorizer(stop_words="english", max_features=max_features)
+    matrix = tfidf.fit_transform(corpus)
+    feature_names = tfidf.get_feature_names_out()
+    mean_tfidf = np.asarray(matrix.mean(axis=0)).ravel()
+    return pd.DataFrame(
+        {"feature": feature_names, "mean_tfidf": mean_tfidf}
+    ).sort_values(by="mean_tfidf", ascending=False)
 
-        return " ".join(tokens)
 
-    def get_top_ngrams(self, corpus, n=2, top_k=15):
-        vec = CountVectorizer(ngram_range=(n, n), stop_words="english").fit(
-            corpus
-        )
-        bag_of_words = vec.transform(corpus)
-        sum_words = bag_of_words.sum(axis=0)
-        words_freq = [
-            (word, sum_words[0, idx]) for word, idx in vec.vocabulary_.items()
-        ]
-        words_freq = sorted(words_freq, key=lambda x: x[1], reverse=True)
-        return pd.DataFrame(words_freq[:top_k], columns=["ngram", "frequency"])
+class InvertedIndex:
 
-    def extract_tfidf_features(self, corpus, max_features=20):
-        tfidf = TfidfVectorizer(stop_words="english", max_features=max_features)
-        matrix = tfidf.fit_transform(corpus)
-        feature_names = tfidf.get_feature_names_out()
-        mean_tfidf = np.asarray(matrix.mean(axis=0)).ravel()
-        return pd.DataFrame({
-            "feature": feature_names,
-            "mean_tfidf": mean_tfidf,
-        }).sort_values(by="mean_tfidf", ascending=False)
+  def __init__(self):
+    self.index = defaultdict(list)
+    self.doc_lengths = {}
+    self.avg_doc_len = 0
+    self.corpus = {}
+
+  def _tokenize(self, text):
+    if not isinstance(text, str):
+      return []
+    text = re.sub(r"[^\w\s]", "", text.lower())
+    return text.split()
+
+  def build_index(self, df, id_col="product_id", text_col="review_body"):
+    total_len = 0
+    for idx, row in df.iterrows():
+      doc_id = row[id_col]
+      tokens = self._tokenize(str(row[text_col]))
+      if doc_id not in self.corpus:
+        self.corpus[doc_id] = row.to_dict()
+        self.doc_lengths[doc_id] = len(tokens)
+        total_len += len(tokens)
+
+      tf_counts = defaultdict(int)
+      for token in tokens:
+        tf_counts[token] += 1
+      for token, count in tf_counts.items():
+        self.index[token].append((doc_id, count))
+    self.avg_doc_len = total_len / max(len(self.corpus), 1)
+
+  def search_bm25(self, query, k1=1.5, b=0.75, top_k=20):
+    query_tokens = self._tokenize(query)
+    scores = defaultdict(float)
+    N = len(self.doc_lengths)
+    for token in query_tokens:
+      if token not in self.index:
+        continue
+      postings = self.index[token]
+      df = len(postings)
+      idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
+      for doc_id, tf in postings:
+        doc_len = self.doc_lengths[doc_id]
+        denom = tf + k1 * (1 - b + b * (doc_len / self.avg_doc_len))
+        scores[doc_id] += idf * ((tf * (k1 + 1)) / denom)
+    sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)[
+        :top_k
+    ]
+    return [(self.corpus[doc_id], score) for doc_id, score in sorted_docs]
+
+
+class GraphRanker:
+
+  def __init__(self):
+    self.graph = nx.DiGraph()
+
+  def build_co_review_graph(self, df):
+    user_to_products = defaultdict(set)
+    for _, row in df.iterrows():
+      user_to_products[row["customer_id"]].add(row["product_id"])
+
+    for products in user_to_products.values():
+      prod_list = list(products)
+      for i in range(len(prod_list)):
+        for j in range(i + 1, len(prod_list)):
+          self.graph.add_edge(prod_list[i], prod_list[j])
+          self.graph.add_edge(prod_list[j], prod_list[i])
+
+  def compute_pagerank(self, alpha=0.85):
+    return nx.pagerank(self.graph, alpha=alpha) if len(self.graph) > 0 else {}
+
+  def compute_hits(self, max_iter=500):
+    if len(self.graph) == 0:
+      return {}, {}
+    try:
+      hubs, authorities = nx.hits(self.graph, max_iter=max_iter)
+      return hubs, authorities
+    except Exception:
+      return {}, {}
+
+
+class RecommenderEngine:
+
+  def __init__(self, df):
+    self.df = df.dropna(subset=["product_id", "customer_id", "review_body"])
+    self._build_content_model()
+    self._build_collaborative_model()
+
+  def _build_content_model(self):
+    self.df["content_mix"] = (
+        self.df["product_title"].fillna("")
+        + " "
+        + self.df["review_body"].fillna("")
+    )
+    self.product_df = self.df.drop_duplicates(subset=["product_id"]).reset_index(
+        drop=True
+    )
+    self.product_ids = self.product_df["product_id"].tolist()
+    self.pid_to_idx = {pid: i for i, pid in enumerate(self.product_ids)}
+
+    tfidf = TfidfVectorizer(stop_words="english", max_features=3000)
+    tfidf_matrix = tfidf.fit_transform(self.product_df["content_mix"])
+    self.content_sim_matrix = cosine_similarity(tfidf_matrix, tfidf_matrix)
+
+  def _build_collaborative_model(self):
+    user_item_matrix = self.df.pivot_table(
+        index="customer_id", columns="product_id", values="star_rating"
+    ).fillna(0)
+    self.user_ids = user_item_matrix.index.tolist()
+    self.collab_product_ids = user_item_matrix.columns.tolist()
+
+    R = user_item_matrix.values
+    user_ratings_mean = np.mean(R, axis=1)
+    R_demeaned = R - user_ratings_mean.reshape(-1, 1)
+
+    k = min(10, min(R.shape) - 1)
+    if k > 0:
+      U, sigma, Vt = svds(R_demeaned, k=k)
+      sigma = np.diag(sigma)
+      predicted_ratings = (
+          np.dot(np.dot(U, sigma), Vt) + user_ratings_mean.reshape(-1, 1)
+      )
+      self.cf_df = pd.DataFrame(
+          predicted_ratings,
+          index=self.user_ids,
+          columns=self.collab_product_ids,
+      )
+    else:
+      self.cf_df = pd.DataFrame(
+          R, index=self.user_ids, columns=self.collab_product_ids
+      )
+
+  def get_content_recommendations(self, product_id, top_k=5):
+    if product_id not in self.pid_to_idx:
+      return []
+    idx = self.pid_to_idx[product_id]
+    sim_scores = list(enumerate(self.content_sim_matrix[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[
+        1 : top_k + 1
+    ]
+
+    recs = []
+    for i, score in sim_scores:
+      row = self.product_df.iloc[i]
+      recs.append({
+          "Product ID": row["product_id"],
+          "Product Title": row["product_title"],
+          "Similarity Score": round(score, 4),
+      })
+    return recs
+
+  def get_collaborative_recommendations(self, customer_id, top_k=5):
+    if customer_id not in self.cf_df.index:
+      return []
+    user_preds = self.cf_df.loc[customer_id].sort_values(ascending=False).head(
+        top_k
+    )
+
+    recs = []
+    for pid, predicted_score in user_preds.items():
+      title_match = self.product_df[self.product_df["product_id"] == pid][
+          "product_title"
+      ]
+      title = (
+          title_match.values[0]
+          if len(title_match) > 0
+          else "Unknown Product Title"
+      )
+      recs.append({
+          "Product ID": pid,
+          "Product Title": title,
+          "Predicted Rating": round(predicted_score, 4),
+      })
+    return recs
+
+
+class IREvaluator:
+
+  @staticmethod
+  def evaluate_retrieval(retrieved_ids, pseudo_relevant_set, k=5):
+    retrieved_k = retrieved_ids[:k]
+    relevant_retrieved = [doc for doc in retrieved_k if doc in pseudo_relevant_set]
+
+    p_k = len(relevant_retrieved) / k if k > 0 else 0.0
+    r_k = (
+        len(relevant_retrieved) / len(pseudo_relevant_set)
+        if pseudo_relevant_set
+        else 0.0
+    )
+    f1 = (2 * p_k * r_k) / (p_k + r_k) if (p_k + r_k) > 0 else 0.0
+
+    mrr = 0.0
+    for rank, doc in enumerate(retrieved_ids, start=1):
+      if doc in pseudo_relevant_set:
+        mrr = 1.0 / rank
+        break
+
+    hits = 0
+    sum_prec = 0.0
+    for i, doc in enumerate(retrieved_ids, start=1):
+      if doc in pseudo_relevant_set:
+        hits += 1
+        sum_prec += hits / i
+    map_score = sum_prec / len(pseudo_relevant_set) if pseudo_relevant_set else 0.0
+
+    dcg = sum([
+        1.0 / np.log2(i + 1)
+        for i, doc in enumerate(retrieved_k, start=1)
+        if doc in pseudo_relevant_set
+    ])
+    idcg = sum([
+        1.0 / np.log2(i + 1)
+        for i in range(1, min(len(pseudo_relevant_set), k) + 1)
+    ])
+    ndcg = dcg / idcg if idcg > 0 else 0.0
+
+    return {
+        f"Precision@{k}": round(p_k, 4),
+        f"Recall@{k}": round(r_k, 4),
+        f"F1-Score@{k}": round(f1, 4),
+        "MRR": round(mrr, 4),
+        "MAP": round(map_score, 4),
+        f"NDCG@{k}": round(ndcg, 4),
+    }
+
 
 # ------------------------------------------------------------------------------
-# 2. STREAMLIT APPLICATION DASHBOARD
+# 2. UNIFIED STREAMLIT APPLICATION
 # ------------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="Information Retrieval System", page_icon="🔍", layout="wide"
 )
 
-st.title("Unified Information Retrieval System")
+st.title("Unified Information Retrieval & Recommender System")
 st.caption("BITS Pilani WILP - Assignment 2")
 
 
-# Load dataset and cache indexes
 @st.cache_resource
 def load_system():
-  df = pd.read_csv("data/sample_amazon_reviews.csv").dropna(
+  df = pd.read_csv("data/sample_amazon_reviews1.csv").dropna(
       subset=["product_id", "review_body", "customer_id"]
   )
 
@@ -263,34 +374,34 @@ def load_system():
   pr_scores = ranker.compute_pagerank()
   hubs, auth_scores = ranker.compute_hits()
 
-  return df, idx, pr_scores, auth_scores, ranker.graph
+  recommender = RecommenderEngine(df)
+
+  return df, idx, pr_scores, auth_scores, ranker.graph, recommender
 
 
 try:
-  df, idx, pr_scores, auth_scores, graph = load_system()
+  df, idx, pr_scores, auth_scores, graph, recommender = load_system()
 except Exception as e:
   st.error(
-      f"Error loading data: {e}. Please place `sample_amazon_reviews.csv` in"
-      " `data/` folder."
+      f"Error initializing system: {e}. Ensure `sample_amazon_reviews.csv` is"
+      " present in `data/`."
   )
   st.stop()
 
-# Sidebar Navigation
 navigation = st.sidebar.radio(
-    "Select System Module",
+    "Select Module",
     [
         "1. Ingestion & Text Mining (Person 1)",
-        "2. Web Search & PageRank Engine (Person 2)",
-        "3. Recommenders & Evaluation (Person 3 Placeholder)",
+        "2. Web Search & Graph Ranking (Person 2)",
+        "3. Recommenders & IR Evaluation (Person 3)",
     ],
 )
 
 # ------------------------------------------------------------------------------
-# MODULE 1: INGESTION, CRAWLING & TEXT MINING
+# MODULE 1: PERSON 1
 # ------------------------------------------------------------------------------
 if navigation == "1. Ingestion & Text Mining (Person 1)":
   st.header("Module 1: Data Ingestion, Crawling & Text Preprocessing")
-
   tab1, tab2 = st.tabs(
       ["Web Crawling Interface", "Text Mining & Corpus Analytics"]
   )
@@ -310,15 +421,15 @@ if navigation == "1. Ingestion & Text Mining (Person 1)":
         crawled_results = crawler.crawl([seed_url])
         st.success(f"Crawled {len(crawled_results)} unique documents!")
 
-        crawl_table = []
-        for item in crawled_results:
-          meta = item["metadata"]
-          crawl_table.append({
-              "Title": meta["title"],
-              "URL": meta["url"],
-              "Depth": meta["depth"],
-              "Content Length": len(item["content"]),
-          })
+        crawl_table = [
+            {
+                "Title": item["metadata"]["title"],
+                "URL": item["metadata"]["url"],
+                "Depth": item["metadata"]["depth"],
+                "Content Length": len(item["content"]),
+            }
+            for item in crawled_results
+        ]
         st.dataframe(pd.DataFrame(crawl_table), use_container_width=True)
 
   with tab2:
@@ -354,12 +465,11 @@ if navigation == "1. Ingestion & Text Mining (Person 1)":
     st.image(wordcloud.to_array(), use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# MODULE 2: SEARCH ENGINE & GRAPH RANKING
+# MODULE 2: PERSON 2
 # ------------------------------------------------------------------------------
-elif navigation == "2. Web Search & PageRank Engine (Person 2)":
+elif navigation == "2. Web Search & Graph Ranking (Person 2)":
   st.header("Module 2: Search Engine & Link-Graph Ranking")
-
-  st.sidebar.header("Ranking Configuration")
+  st.sidebar.header("Ranking Controls")
   alpha = st.sidebar.slider(
       "BM25 vs PageRank Weight (alpha)",
       0.0,
@@ -373,7 +483,6 @@ elif navigation == "2. Web Search & PageRank Engine (Person 2)":
 
   if query:
     raw_results = idx.search_bm25(query, top_k=top_k * 2)
-
     if not raw_results:
       st.warning("No matching products found.")
     else:
@@ -414,12 +523,81 @@ elif navigation == "2. Web Search & PageRank Engine (Person 2)":
       )
 
 # ------------------------------------------------------------------------------
-# MODULE 3: RECOMMENDERS & EVALUATION
+# MODULE 3: PERSON 3
 # ------------------------------------------------------------------------------
 else:
-  st.header("Module 3: Recommender System & IR Evaluation Dashboard")
-  st.info(
-      "This section is allocated to Person 3 for Section E (Content-Based /"
-      " Collaborative Recommender) and Section F (Precision, Recall, MAP,"
-      " NDCG Metrics)."
+  st.header("Module 3: Recommender System & IR Evaluation (Person 3)")
+
+  rec_tab, eval_tab = st.tabs(
+      ["Recommender Panel (Section E)", "Evaluation Analytics (Section F)"]
   )
+
+  with rec_tab:
+    st.subheader("Product Recommender Engine")
+    mode = st.radio(
+        "Select Recommendation Mode:",
+        ["Content-Based (Item-Item)", "Collaborative Filtering (User-Item)"],
+    )
+
+    if mode == "Content-Based (Item-Item)":
+      sample_pid = st.selectbox(
+          "Select Target Product ID:", recommender.product_ids[:15]
+      )
+      if st.button("Generate Recommendations"):
+        recs = recommender.get_content_recommendations(sample_pid, top_k=5)
+        st.write(
+            "**Top Recommended Items based on Description & Similarity:**"
+        )
+        st.dataframe(pd.DataFrame(recs), use_container_width=True)
+
+    else:
+      sample_user = st.selectbox(
+          "Select Target User ID:", recommender.user_ids[:15]
+      )
+      if st.button("Generate Recommendations"):
+        recs = recommender.get_collaborative_recommendations(
+            sample_user, top_k=5
+        )
+        st.write(
+            "**Top Recommended Items based on User Ratings (Matrix"
+            " Factorization):**"
+        )
+        st.dataframe(pd.DataFrame(recs), use_container_width=True)
+
+  with eval_tab:
+    st.subheader("IR System Evaluation Metrics Dashboard")
+    eval_query = st.text_input(
+        "Evaluation Query:",
+        "camera lens",
+        key="eval_q",
+    )
+    k_val = st.slider("Evaluation K Depth", 3, 10, 5)
+
+    if eval_query:
+      search_hits = idx.search_bm25(eval_query, top_k=15)
+      retrieved_pids = [item["product_id"] for item, _ in search_hits]
+
+      # Ground truth: Products matching query tokens in product title
+      pseudo_ground_truth = set(
+          df[
+              df["product_title"]
+              .str.lower()
+              .str.contains(eval_query.lower(), na=False)
+          ]["product_id"].unique()
+      )
+
+      metrics = IREvaluator.evaluate_retrieval(
+          retrieved_pids, pseudo_ground_truth, k=k_val
+      )
+
+      st.write(f"**Evaluation Results for Query: '{eval_query}' (K={k_val})**")
+      m_df = pd.DataFrame([metrics])
+      st.dataframe(m_df, use_container_width=True)
+
+      fig_metrics = px.bar(
+          x=list(metrics.keys()),
+          y=list(metrics.values()),
+          labels={"x": "Metric", "y": "Score"},
+          title=f"Retrieval Metrics Performance (K={k_val})",
+      )
+      st.plotly_chart(fig_metrics, use_container_width=True)
