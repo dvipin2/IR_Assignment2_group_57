@@ -1,6 +1,8 @@
 import hashlib
 import math
+import os
 import re
+import time
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse
 
@@ -15,7 +17,11 @@ import plotly.express as px
 import requests
 from scipy.sparse.linalg import svds
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.metrics import accuracy_score
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
 import streamlit as st
 from wordcloud import WordCloud
 
@@ -40,10 +46,17 @@ class SimpleCrawler:
   def _get_hash(self, content):
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
+  @staticmethod
+  def _canonical_url(url):
+    parsed = urlparse(url.strip())
+    path = parsed.path or "/"
+    return parsed._replace(fragment="", query="", path=path.rstrip("/") or "/").geturl()
+
   def crawl(self, seed_urls):
-    queue = [(url, 0) for url in seed_urls]
+    queue = [(self._canonical_url(url), 0) for url in seed_urls if url.strip()]
     while queue and len(self.crawled_data) < self.max_pages:
       url, depth = queue.pop(0)
+      url = self._canonical_url(url)
       if url in self.visited_urls or depth > self.max_depth:
         continue
       self.visited_urls.add(url)
@@ -75,7 +88,7 @@ class SimpleCrawler:
 
         if depth < self.max_depth:
           for link in soup.find_all("a", href=True):
-            next_url = urljoin(url, link["href"])
+            next_url = self._canonical_url(urljoin(url, link["href"]))
             if (
                 next_url.startswith("http")
                 and next_url not in self.visited_urls
@@ -89,7 +102,11 @@ class SimpleCrawler:
 class TextMiner:
 
   def __init__(self):
-    self.stop_words = set(stopwords.words("english"))
+    try:
+      self.stop_words = set(stopwords.words("english"))
+    except LookupError:
+      # Keep the Streamlit workflow usable in a restricted Virtual Lab session.
+      self.stop_words = set()
     self.lemmatizer = WordNetLemmatizer()
 
   def preprocess(self, text, use_lemmatization=True):
@@ -99,7 +116,10 @@ class TextMiner:
     tokens = text.split()
     tokens = [w for w in tokens if w not in self.stop_words and len(w) > 2]
     if use_lemmatization:
-      tokens = [self.lemmatizer.lemmatize(w) for w in tokens]
+      try:
+        tokens = [self.lemmatizer.lemmatize(w) for w in tokens]
+      except LookupError:
+        pass
     return " ".join(tokens)
 
   def get_top_ngrams(self, corpus, n=2, top_k=15):
@@ -121,6 +141,29 @@ class TextMiner:
         {"feature": feature_names, "mean_tfidf": mean_tfidf}
     ).sort_values(by="mean_tfidf", ascending=False)
 
+  def document_profile(self, df, text_col="review_body"):
+    profile = df.copy()
+    profile["word_count"] = profile[text_col].fillna("").astype(str).str.split().str.len()
+    profile["char_count"] = profile[text_col].fillna("").astype(str).str.len()
+    return profile
+
+  def classify_documents(self, df):
+    """Classify documents into the dataset's product categories."""
+    work = df[["review_body", "product_category"]].dropna()
+    if work["product_category"].nunique() < 2 or len(work) < 20:
+      return {"accuracy": 0.0, "classes": int(work["product_category"].nunique())}
+    x_train, x_test, y_train, y_test = train_test_split(
+        work["review_body"], work["product_category"], test_size=0.2,
+        random_state=42, stratify=work["product_category"]
+    )
+    model = Pipeline([
+        ("tfidf", TfidfVectorizer(stop_words="english", max_features=3000)),
+        ("classifier", LogisticRegression(max_iter=300)),
+    ])
+    model.fit(x_train, y_train)
+    return {"accuracy": float(accuracy_score(y_test, model.predict(x_test))),
+            "classes": int(work["product_category"].nunique())}
+
 
 class InvertedIndex:
 
@@ -137,10 +180,15 @@ class InvertedIndex:
     return text.split()
 
   def build_index(self, df, id_col="product_id", text_col="review_body"):
+    grouped = df.groupby(id_col, as_index=False).agg(
+        {text_col: lambda s: " ".join(s.astype(str)),
+         "product_title": "first", "star_rating": "mean",
+         "product_category": "first"}
+    )
     total_len = 0
-    for idx, row in df.iterrows():
+    for _, row in grouped.iterrows():
       doc_id = row[id_col]
-      tokens = self._tokenize(str(row[text_col]))
+      tokens = self._tokenize(str(row[text_col]) + " " + str(row["product_title"]))
       if doc_id not in self.corpus:
         self.corpus[doc_id] = row.to_dict()
         self.doc_lengths[doc_id] = len(tokens)
@@ -276,9 +324,9 @@ class RecommenderEngine:
   def get_collaborative_recommendations(self, customer_id, top_k=5):
     if customer_id not in self.cf_df.index:
       return []
-    user_preds = self.cf_df.loc[customer_id].sort_values(ascending=False).head(
-        top_k
-    )
+    rated = set(self.df.loc[self.df["customer_id"] == customer_id, "product_id"])
+    user_preds = self.cf_df.loc[customer_id].drop(index=rated, errors="ignore") \
+        .sort_values(ascending=False).head(top_k)
 
     recs = []
     for pid, predicted_score in user_preds.items():
@@ -339,6 +387,9 @@ class IREvaluator:
     ndcg = dcg / idcg if idcg > 0 else 0.0
 
     return {
+        "Precision": round(p_k, 4),
+        "Recall": round(r_k, 4),
+        "F1-score": round(f1, 4),
         f"Precision@{k}": round(p_k, 4),
         f"Recall@{k}": round(r_k, 4),
         f"F1-Score@{k}": round(f1, 4),
@@ -362,7 +413,10 @@ st.caption("BITS Pilani WILP - Assignment 2")
 
 @st.cache_resource
 def load_system():
-  df = pd.read_csv("data/sample_amazon_reviews1.csv").dropna(
+  data_path = "data/sample_amazon_reviews1.csv"
+  if not os.path.exists(data_path):
+    data_path = "data/sample_amazon_reviews.csv"
+  df = pd.read_csv(data_path).dropna(
       subset=["product_id", "review_body", "customer_id"]
   )
 
@@ -372,35 +426,51 @@ def load_system():
   ranker = GraphRanker()
   ranker.build_co_review_graph(df)
   pr_scores = ranker.compute_pagerank()
-  hubs, auth_scores = ranker.compute_hits()
 
   recommender = RecommenderEngine(df)
 
-  return df, idx, pr_scores, auth_scores, ranker.graph, recommender
+  return df, idx, pr_scores, ranker.graph, recommender
 
 
 try:
-  df, idx, pr_scores, auth_scores, graph, recommender = load_system()
+  df, idx, pr_scores, graph, recommender = load_system()
 except Exception as e:
   st.error(
-      f"Error initializing system: {e}. Ensure `sample_amazon_reviews.csv` is"
-      " present in `data/`."
+      f"Error initializing system: {e}. Ensure an Amazon reviews CSV is present in `data/`."
   )
   st.stop()
 
 navigation = st.sidebar.radio(
     "Select Module",
     [
+        "0. Dashboard & Index Management",
         "1. Ingestion & Text Mining (Person 1)",
         "2. Web Search & Graph Ranking (Person 2)",
         "3. Recommenders & IR Evaluation (Person 3)",
     ],
 )
 
+if navigation == "0. Dashboard & Index Management":
+  st.header("Dashboard & Index Management")
+  c1, c2, c3, c4 = st.columns(4)
+  c1.metric("Review records", f"{len(df):,}")
+  c2.metric("Indexed products", f"{len(idx.corpus):,}")
+  c3.metric("Vocabulary terms", f"{len(idx.index):,}")
+  c4.metric("Graph edges", f"{graph.number_of_edges():,}")
+  st.subheader("Index status")
+  st.write({"average_document_length": round(idx.avg_doc_len, 2),
+            "graph_nodes": graph.number_of_nodes(),
+            "pagerank_nodes": len(pr_scores),
+            "metadata_fields": ["product_id", "product_title", "star_rating", "product_category"]})
+  if st.button("Rebuild index and graph"):
+    load_system.clear()
+    st.rerun()
+  st.info("The index is built from the supplied dataset and is rebuilt through this Streamlit interface.")
+
 # ------------------------------------------------------------------------------
 # MODULE 1: PERSON 1
 # ------------------------------------------------------------------------------
-if navigation == "1. Ingestion & Text Mining (Person 1)":
+elif navigation == "1. Ingestion & Text Mining (Person 1)":
   st.header("Module 1: Data Ingestion, Crawling & Text Preprocessing")
   tab1, tab2 = st.tabs(
       ["Web Crawling Interface", "Text Mining & Corpus Analytics"]
@@ -408,8 +478,9 @@ if navigation == "1. Ingestion & Text Mining (Person 1)":
 
   with tab1:
     st.subheader("Configurable Web Crawler (Section B)")
-    seed_url = st.text_input(
-        "Enter Seed URL:", "https://en.wikipedia.org/wiki/Information_retrieval"
+    seed_urls = st.text_area(
+        "Enter seed URLs (one URL per line):",
+        "https://en.wikipedia.org/wiki/Information_retrieval"
     )
     col1, col2 = st.columns(2)
     depth = col1.slider("Crawling Depth", 1, 3, 1)
@@ -418,7 +489,7 @@ if navigation == "1. Ingestion & Text Mining (Person 1)":
     if st.button("Start Web Crawler"):
       with st.spinner("Crawling web pages..."):
         crawler = SimpleCrawler(max_depth=depth, max_pages=max_pages)
-        crawled_results = crawler.crawl([seed_url])
+        crawled_results = crawler.crawl(seed_urls.splitlines())
         st.success(f"Crawled {len(crawled_results)} unique documents!")
 
         crawl_table = [
@@ -464,6 +535,24 @@ if navigation == "1. Ingestion & Text Mining (Person 1)":
     ).generate(all_text)
     st.image(wordcloud.to_array(), use_container_width=True)
 
+    st.subheader("Document profiling and classification")
+    profile = miner.document_profile(df)
+    pc1, pc2, pc3 = st.columns(3)
+    pc1.metric("Mean words/document", f"{profile['word_count'].mean():.1f}")
+    pc2.metric("Mean characters/document", f"{profile['char_count'].mean():.1f}")
+    pc3.metric("Categories", int(df["product_category"].nunique()))
+    st.dataframe(df["product_category"].value_counts().rename_axis("category").reset_index(name="documents"), use_container_width=True)
+    class_result = miner.classify_documents(df)
+    st.metric("Category-classification accuracy", f"{class_result['accuracy']:.3f}")
+
+    st.subheader("Comparative preprocessing and feature extraction")
+    comparison = []
+    for label, lemma in [("Without lemmatization", False), ("With lemmatization", True)]:
+      processed = df["review_body"].apply(lambda x: miner.preprocess(x, use_lemmatization=lemma))
+      comparison.append({"strategy": label, "mean_tokens": round(processed.str.split().str.len().mean(), 2),
+                         "unique_terms": len(set(" ".join(processed).split()))})
+    st.dataframe(pd.DataFrame(comparison), use_container_width=True)
+
 # ------------------------------------------------------------------------------
 # MODULE 2: PERSON 2
 # ------------------------------------------------------------------------------
@@ -482,6 +571,7 @@ elif navigation == "2. Web Search & Graph Ranking (Person 2)":
   query = st.text_input("Enter product search query:", "camera lens")
 
   if query:
+    search_started = time.perf_counter()
     raw_results = idx.search_bm25(query, top_k=top_k * 2)
     if not raw_results:
       st.warning("No matching products found.")
@@ -495,17 +585,16 @@ elif navigation == "2. Web Search & Graph Ranking (Person 2)":
         norm_bm25 = bm25_score / max_bm25
         pr = pr_scores.get(pid, 0.0)
         norm_pr = pr / max_pr
-        auth = auth_scores.get(pid, 0.0)
-
         final_score = (alpha * norm_bm25) + ((1 - alpha) * norm_pr)
 
         combined_results.append({
             "Product Title": item["product_title"],
             "Product ID": pid,
+            "Star Rating": round(float(item.get("star_rating", 0)), 2),
+            "Category": item.get("product_category", ""),
             "Combined Score": round(final_score, 4),
             "BM25 Score": round(bm25_score, 4),
             "PageRank": round(pr, 6),
-            "HITS Authority": round(auth, 6),
         })
 
       combined_results = sorted(
@@ -514,6 +603,9 @@ elif navigation == "2. Web Search & Graph Ranking (Person 2)":
 
       st.subheader("Ranked Search Results (Section D)")
       st.dataframe(pd.DataFrame(combined_results), use_container_width=True)
+      rank_plot = pd.DataFrame(combined_results).head(top_k).sort_values("Combined Score")
+      st.plotly_chart(px.bar(rank_plot, x="Combined Score", y="Product Title", orientation="h",
+                             title="PageRank-aware ranking: final ranked scores"), use_container_width=True)
 
       col1, col2, col3 = st.columns(3)
       col1.metric("Graph Nodes (Products)", graph.number_of_nodes())
@@ -521,6 +613,7 @@ elif navigation == "2. Web Search & Graph Ranking (Person 2)":
       col3.metric(
           "Top PageRank Score", f"{combined_results[0]['PageRank']:.6f}"
       )
+      st.metric("Search time (seconds)", f"{time.perf_counter() - search_started:.4f}")
 
 # ------------------------------------------------------------------------------
 # MODULE 3: PERSON 3
@@ -574,15 +667,17 @@ else:
     k_val = st.slider("Evaluation K Depth", 3, 10, 5)
 
     if eval_query:
+      eval_started = time.perf_counter()
       search_hits = idx.search_bm25(eval_query, top_k=15)
       retrieved_pids = [item["product_id"] for item, _ in search_hits]
 
-      # Ground truth: Products matching query tokens in product title
+      # Transparent pseudo relevance: every query token appears in the title.
+      query_tokens = [t for t in re.findall(r"\w+", eval_query.lower()) if len(t) > 2]
       pseudo_ground_truth = set(
           df[
-              df["product_title"]
-              .str.lower()
-              .str.contains(eval_query.lower(), na=False)
+              df["product_title"].fillna("").str.lower().apply(
+                  lambda title: all(token in title for token in query_tokens)
+              )
           ]["product_id"].unique()
       )
 
@@ -593,6 +688,25 @@ else:
       st.write(f"**Evaluation Results for Query: '{eval_query}' (K={k_val})**")
       m_df = pd.DataFrame([metrics])
       st.dataframe(m_df, use_container_width=True)
+
+      # Comparative analysis required by Section F: lexical ranking versus
+      # PageRank-aware ranking over the same retrieved candidate set.
+      max_bm25_eval = max((score for _, score in search_hits), default=1.0) or 1.0
+      max_pr_eval = max(pr_scores.values(), default=1.0) or 1.0
+      reranked = sorted(
+          [(item["product_id"], 0.7 * score / max_bm25_eval +
+            0.3 * pr_scores.get(item["product_id"], 0.0) / max_pr_eval)
+           for item, score in search_hits], key=lambda x: x[1], reverse=True
+      )
+      comparison_metrics = pd.DataFrame([
+          {"ranking": "BM25", **IREvaluator.evaluate_retrieval(retrieved_pids, pseudo_ground_truth, k_val)},
+          {"ranking": "BM25 + PageRank", **IREvaluator.evaluate_retrieval([pid for pid, _ in reranked], pseudo_ground_truth, k_val)},
+      ])
+      st.subheader("Comparative ranking analysis")
+      st.dataframe(comparison_metrics, use_container_width=True)
+      st.plotly_chart(px.bar(comparison_metrics, x="ranking", y=f"NDCG@{k_val}",
+                             title="NDCG comparison: BM25 versus PageRank-aware ranking"), use_container_width=True)
+      st.metric("Evaluation time (seconds)", f"{time.perf_counter() - eval_started:.4f}")
 
       fig_metrics = px.bar(
           x=list(metrics.keys()),
