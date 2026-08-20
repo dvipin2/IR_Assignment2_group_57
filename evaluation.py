@@ -1,6 +1,8 @@
 # ==========================================
 # SECTION F: IR METRICS EVALUATION SYSTEM
 # ==========================================
+import numpy as np
+
 class IREvaluationMetrics:
     @staticmethod
     def precision_at_k(actual_relevant, retrieved_list, k):
