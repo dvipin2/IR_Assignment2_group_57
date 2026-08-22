@@ -1,1 +1,16 @@
 sudo dnf groupinstall "Development Tools" -y && sudo dnf install -y wget tar xz openssl-devel bzip2-devel libffi-devel zlib-devel readline-devel sqlite-devel xz-devel tk-devel uuid-devel && cd /tmp && wget -q https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz && tar -xf Python-3.14.7.tar.xz && cd Python-3.14.7 && ./configure --prefix=/usr/local/python3.14.7 --with-ensurepip=install && make -j"$(nproc)" && sudo make altinstall && echo 'export PATH="/usr/local/python3.14.7/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc && python3.14 --version
+
+
+export PATH="/usr/local/python3.14.7/bin:$PATH"
+hash -r
+python3.14 --version
+
+echo 'export PATH="/usr/local/python3.14.7/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+cd ~/IR_Assignment2_group_57
+python3.14 -m venv .venv
+source .venv/bin/activate
+python --version
+
+python -m pip install -r requirements.txt
