@@ -1,4 +1,4 @@
-Information Retrieval Assignment 2 – Group 57
+# Information Retrieval Assignment 2 – Group 57
 
 This project is a single Streamlit-based Information Retrieval system using the Amazon Camera/Electronics customer-review corpus.
 
@@ -7,7 +7,14 @@ This project is a single Streamlit-based Information Retrieval system using the 
 ```bash
 python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Run these commands from the project root, where `app.py`, `requirements.txt`, and `data/` are located. Verify the installation before launching:
+
+```bash
+python -c "import bs4, streamlit; print('dependencies installed')"
 ```
 
 NLTK downloads `stopwords` and `wordnet` on first launch. Internet access is required for the live crawler and the first NLTK download.
