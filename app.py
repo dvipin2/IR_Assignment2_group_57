@@ -41,6 +41,7 @@ class SimpleCrawler:
     self.visited_urls = set()
     self.doc_hashes = set()
     self.crawled_data = []
+    self.errors = []
 
   def _get_hash(self, content):
     return hashlib.md5(content.encode("utf-8")).hexdigest()
@@ -66,6 +67,7 @@ class SimpleCrawler:
             headers={"User-Agent": "Mozilla/5.0 (IR_Assignment_Bot)"},
         )
         if response.status_code != 200:
+          self.errors.append({"url": url, "error": f"HTTP {response.status_code}"})
           continue
         soup = BeautifulSoup(response.text, "html.parser")
         text_content = soup.get_text(separator=" ", strip=True)
@@ -93,7 +95,8 @@ class SimpleCrawler:
                 and next_url not in self.visited_urls
             ):
               queue.append((next_url, depth + 1))
-      except Exception:
+      except Exception as exc:
+        self.errors.append({"url": url, "error": str(exc)})
         continue
     return self.crawled_data
 
@@ -464,9 +467,9 @@ navigation = st.sidebar.radio(
     "Select Module",
     [
         "0. Dashboard & Index Management",
-        "1. Ingestion & Text Mining ",
+        "1. Ingestion & Text Mining",
         "2. Web Search & Graph Ranking",
-        "3. Recommenders & IR Evaluation ",
+        "3. Recommenders & IR Evaluation",
     ],
 )
 
@@ -511,6 +514,7 @@ elif navigation == "1. Ingestion & Text Mining":
         crawler = SimpleCrawler(max_depth=depth, max_pages=max_pages)
         crawled_results = crawler.crawl(seed_urls.splitlines())
         st.session_state.crawled_results = crawled_results
+        st.session_state.crawl_errors = crawler.errors
 
     if st.session_state.get("crawled_results"):
         crawled_results = st.session_state.crawled_results
@@ -541,6 +545,9 @@ elif navigation == "1. Ingestion & Text Mining":
           st.session_state.runtime_system = build_system(merged_df)
           st.success("Crawled documents were added to the indexed collection.")
           st.rerun()
+    elif st.session_state.get("crawl_errors"):
+        st.error("The crawler could not fetch any documents. Check the URLs and network access.")
+        st.dataframe(pd.DataFrame(st.session_state.crawl_errors), use_container_width=True)
 
   with tab2:
     st.subheader("Amazon Corpus Preprocessing & Feature Mining (Section C)")
@@ -602,7 +609,7 @@ elif navigation == "1. Ingestion & Text Mining":
                                  "feature_count": len(vectorizer.get_feature_names_out()),
                                  "nonzero_values": int(matrix.nnz)})
     st.dataframe(pd.DataFrame(feature_comparison), use_container_width=True)
- 
+
 # ------------------------------------------------------------------------------
 # MODULE 2:
 # ------------------------------------------------------------------------------
