@@ -1,4 +1,4 @@
-Information Retrieval Assignment 2 – Report
+# Information Retrieval Assignment 2 – Report
 
 ## 1. Use case and data
 
@@ -14,7 +14,7 @@ The system retrieves and recommends Amazon products from customer-review text. T
 
 ## 3. Experimental results
 
-Run the application in the Virtual Lab and paste the output tables and screenshots here. Use multiple queries and at least two K values. Record the query, relevance definition, retrieved results, metrics, and timing.
+Run the application in the Virtual Lab and paste the output tables and screenshots here. Use the multi-query evaluation box with at least three queries and repeat at two K values. Record the relevance definition, retrieved results, metrics, and timing. The displayed MAP is the mean of the per-query average precision values.
 
 | Query | K | Ranking | Precision@K | Recall@K | F1@K | MAP | MRR | NDCG@K |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
