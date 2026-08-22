@@ -14,3 +14,6 @@ source .venv/bin/activate
 python --version
 
 python -m pip install -r requirements.txt
+
+https://en.wikipedia.org/wiki/Information_retrieval
+https://en.wikipedia.org/wiki/Search_engine
