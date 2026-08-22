@@ -1,6 +1,5 @@
 import hashlib
 import math
-import os
 import re
 import time
 from collections import defaultdict
@@ -30,7 +29,7 @@ nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
 
 # ------------------------------------------------------------------------------
-# 1. CORE ALGORITHMIC UTILITIES (Person 1, 2, & 3)
+# 1. CORE ALGORITHMIC UTILITIES
 # ------------------------------------------------------------------------------
 
 
@@ -105,7 +104,6 @@ class TextMiner:
     try:
       self.stop_words = set(stopwords.words("english"))
     except LookupError:
-      # Keep the Streamlit workflow usable in a restricted Virtual Lab session.
       self.stop_words = set()
     self.lemmatizer = WordNetLemmatizer()
 
@@ -241,16 +239,6 @@ class GraphRanker:
   def compute_pagerank(self, alpha=0.85):
     return nx.pagerank(self.graph, alpha=alpha) if len(self.graph) > 0 else {}
 
-  def compute_hits(self, max_iter=500):
-    if len(self.graph) == 0:
-      return {}, {}
-    try:
-      hubs, authorities = nx.hits(self.graph, max_iter=max_iter)
-      return hubs, authorities
-    except Exception:
-      return {}, {}
-
-
 class RecommenderEngine:
 
   def __init__(self, df):
@@ -331,7 +319,7 @@ class RecommenderEngine:
     recs = []
     for pid, predicted_score in user_preds.items():
       title_match = self.product_df[self.product_df["product_id"] == pid][
-          "product_title"
+        "product_title"
       ]
       title = (
           title_match.values[0]
@@ -353,6 +341,16 @@ class IREvaluator:
     retrieved_k = retrieved_ids[:k]
     relevant_retrieved = [doc for doc in retrieved_k if doc in pseudo_relevant_set]
 
+    p_full = (
+        len([doc for doc in retrieved_ids if doc in pseudo_relevant_set]) /
+        len(retrieved_ids)
+        if retrieved_ids else 0.0
+    )
+    r_full = (
+        len(set(retrieved_ids).intersection(pseudo_relevant_set)) /
+        len(pseudo_relevant_set)
+        if pseudo_relevant_set else 0.0
+    )
     p_k = len(relevant_retrieved) / k if k > 0 else 0.0
     r_k = (
         len(relevant_retrieved) / len(pseudo_relevant_set)
@@ -387,9 +385,10 @@ class IREvaluator:
     ndcg = dcg / idcg if idcg > 0 else 0.0
 
     return {
-        "Precision": round(p_k, 4),
-        "Recall": round(r_k, 4),
-        "F1-score": round(f1, 4),
+        "Precision": round(p_full, 4),
+        "Recall": round(r_full, 4),
+        "F1-score": round((2 * p_full * r_full) / (p_full + r_full), 4)
+        if p_full + r_full else 0.0,
         f"Precision@{k}": round(p_k, 4),
         f"Recall@{k}": round(r_k, 4),
         f"F1-Score@{k}": round(f1, 4),
@@ -397,6 +396,25 @@ class IREvaluator:
         "MAP": round(map_score, 4),
         f"NDCG@{k}": round(ndcg, 4),
     }
+
+  @staticmethod
+  def evaluate_queries(query_results, k=5):
+    """Return per-query metrics and their mean across queries.
+
+    query_results is an iterable of (query, retrieved_ids, relevant_ids).
+    The mean of per-query average precision values is true MAP.
+    """
+    rows = []
+    for query, retrieved_ids, relevant_ids in query_results:
+      rows.append({"Query": query, **IREvaluator.evaluate_retrieval(
+          retrieved_ids, set(relevant_ids), k=k
+      )})
+    detail = pd.DataFrame(rows)
+    if detail.empty:
+      return detail, pd.DataFrame()
+    numeric = detail.select_dtypes(include="number").mean().to_frame().T
+    numeric.insert(0, "Query", "Mean across queries")
+    return detail, numeric
 
 
 # ------------------------------------------------------------------------------
@@ -411,15 +429,7 @@ st.title("Unified Information Retrieval & Recommender System")
 st.caption("BITS Pilani WILP - Assignment 2")
 
 
-@st.cache_resource
-def load_system():
-  data_path = "data/sample_amazon_reviews1.csv"
-  if not os.path.exists(data_path):
-    data_path = "data/sample_amazon_reviews.csv"
-  df = pd.read_csv(data_path).dropna(
-      subset=["product_id", "review_body", "customer_id"]
-  )
-
+def build_system(df):
   idx = InvertedIndex()
   idx.build_index(df)
 
@@ -432,8 +442,18 @@ def load_system():
   return df, idx, pr_scores, ranker.graph, recommender
 
 
+@st.cache_resource
+def load_system():
+  df = pd.read_csv("data/sample_amazon_reviews1.csv").dropna(
+      subset=["product_id", "review_body", "customer_id"]
+  )
+  return build_system(df)
+
+
 try:
-  df, idx, pr_scores, graph, recommender = load_system()
+  if "runtime_system" not in st.session_state:
+    st.session_state.runtime_system = load_system()
+  df, idx, pr_scores, graph, recommender = st.session_state.runtime_system
 except Exception as e:
   st.error(
       f"Error initializing system: {e}. Ensure an Amazon reviews CSV is present in `data/`."
@@ -444,9 +464,9 @@ navigation = st.sidebar.radio(
     "Select Module",
     [
         "0. Dashboard & Index Management",
-        "1. Ingestion & Text Mining (Person 1)",
-        "2. Web Search & Graph Ranking (Person 2)",
-        "3. Recommenders & IR Evaluation (Person 3)",
+        "1. Ingestion & Text Mining ",
+        "2. Web Search & Graph Ranking",
+        "3. Recommenders & IR Evaluation ",
     ],
 )
 
@@ -463,14 +483,14 @@ if navigation == "0. Dashboard & Index Management":
             "pagerank_nodes": len(pr_scores),
             "metadata_fields": ["product_id", "product_title", "star_rating", "product_category"]})
   if st.button("Rebuild index and graph"):
-    load_system.clear()
+    st.session_state.runtime_system = load_system()
     st.rerun()
   st.info("The index is built from the supplied dataset and is rebuilt through this Streamlit interface.")
 
 # ------------------------------------------------------------------------------
-# MODULE 1: PERSON 1
+# MODULE 1: 
 # ------------------------------------------------------------------------------
-elif navigation == "1. Ingestion & Text Mining (Person 1)":
+elif navigation == "1. Ingestion & Text Mining":
   st.header("Module 1: Data Ingestion, Crawling & Text Preprocessing")
   tab1, tab2 = st.tabs(
       ["Web Crawling Interface", "Text Mining & Corpus Analytics"]
@@ -490,8 +510,11 @@ elif navigation == "1. Ingestion & Text Mining (Person 1)":
       with st.spinner("Crawling web pages..."):
         crawler = SimpleCrawler(max_depth=depth, max_pages=max_pages)
         crawled_results = crawler.crawl(seed_urls.splitlines())
-        st.success(f"Crawled {len(crawled_results)} unique documents!")
+        st.session_state.crawled_results = crawled_results
 
+    if st.session_state.get("crawled_results"):
+        crawled_results = st.session_state.crawled_results
+        st.success(f"Crawled {len(crawled_results)} unique documents!")
         crawl_table = [
             {
                 "Title": item["metadata"]["title"],
@@ -502,6 +525,22 @@ elif navigation == "1. Ingestion & Text Mining (Person 1)":
             for item in crawled_results
         ]
         st.dataframe(pd.DataFrame(crawl_table), use_container_width=True)
+        if st.button("Add crawled documents to indexed collection"):
+          crawl_df = pd.DataFrame([
+              {
+                  "product_id": item["metadata"]["url"],
+                  "customer_id": f"crawl:{item['metadata']['url']}",
+                  "product_title": item["metadata"]["title"],
+                  "review_body": item["content"],
+                  "star_rating": 0,
+                  "product_category": item["metadata"]["domain"],
+              }
+              for item in crawled_results
+          ])
+          merged_df = pd.concat([df, crawl_df], ignore_index=True)
+          st.session_state.runtime_system = build_system(merged_df)
+          st.success("Crawled documents were added to the indexed collection.")
+          st.rerun()
 
   with tab2:
     st.subheader("Amazon Corpus Preprocessing & Feature Mining (Section C)")
@@ -553,10 +592,21 @@ elif navigation == "1. Ingestion & Text Mining (Person 1)":
                          "unique_terms": len(set(" ".join(processed).split()))})
     st.dataframe(pd.DataFrame(comparison), use_container_width=True)
 
+    feature_comparison = []
+    for label, vectorizer in [
+        ("Bag-of-Words", CountVectorizer(stop_words="english", max_features=1000)),
+        ("TF-IDF", TfidfVectorizer(stop_words="english", max_features=1000)),
+    ]:
+      matrix = vectorizer.fit_transform(processed_corpus)
+      feature_comparison.append({"feature_strategy": label,
+                                 "feature_count": len(vectorizer.get_feature_names_out()),
+                                 "nonzero_values": int(matrix.nnz)})
+    st.dataframe(pd.DataFrame(feature_comparison), use_container_width=True)
+ 
 # ------------------------------------------------------------------------------
-# MODULE 2: PERSON 2
+# MODULE 2:
 # ------------------------------------------------------------------------------
-elif navigation == "2. Web Search & Graph Ranking (Person 2)":
+elif navigation == "2. Web Search & Graph Ranking":
   st.header("Module 2: Search Engine & Link-Graph Ranking")
   st.sidebar.header("Ranking Controls")
   alpha = st.sidebar.slider(
@@ -616,10 +666,10 @@ elif navigation == "2. Web Search & Graph Ranking (Person 2)":
       st.metric("Search time (seconds)", f"{time.perf_counter() - search_started:.4f}")
 
 # ------------------------------------------------------------------------------
-# MODULE 3: PERSON 3
+# MODULE 3:
 # ------------------------------------------------------------------------------
 else:
-  st.header("Module 3: Recommender System & IR Evaluation (Person 3)")
+  st.header("Module 3: Recommender System & IR Evaluation")
 
   rec_tab, eval_tab = st.tabs(
       ["Recommender Panel (Section E)", "Evaluation Analytics (Section F)"]
@@ -659,58 +709,56 @@ else:
 
   with eval_tab:
     st.subheader("IR System Evaluation Metrics Dashboard")
-    eval_query = st.text_input(
-        "Evaluation Query:",
-        "camera lens",
+    eval_queries = st.text_area(
+        "Evaluation Queries (one query per line):",
+        "camera lens\ncamera\nbattery",
         key="eval_q",
     )
     k_val = st.slider("Evaluation K Depth", 3, 10, 5)
 
-    if eval_query:
-      eval_started = time.perf_counter()
-      search_hits = idx.search_bm25(eval_query, top_k=15)
-      retrieved_pids = [item["product_id"] for item, _ in search_hits]
+    if eval_queries.strip():
+      evaluation_started = time.perf_counter()
+      query_lines = [q.strip() for q in eval_queries.splitlines() if q.strip()]
+      bm25_inputs, pagerank_inputs = [], []
+      for eval_query in query_lines:
+        search_hits = idx.search_bm25(eval_query, top_k=15)
+        retrieved_pids = [item["product_id"] for item, _ in search_hits]
+        query_tokens = [t for t in re.findall(r"\w+", eval_query.lower()) if len(t) > 2]
+        pseudo_ground_truth = set(df[df["product_title"].fillna("").str.lower().apply(
+            lambda title: all(token in title for token in query_tokens)
+        )]["product_id"].unique())
+        bm25_inputs.append((eval_query, retrieved_pids, pseudo_ground_truth))
 
-      # Transparent pseudo relevance: every query token appears in the title.
-      query_tokens = [t for t in re.findall(r"\w+", eval_query.lower()) if len(t) > 2]
-      pseudo_ground_truth = set(
-          df[
-              df["product_title"].fillna("").str.lower().apply(
-                  lambda title: all(token in title for token in query_tokens)
-              )
-          ]["product_id"].unique()
-      )
+        max_bm25_eval = max((score for _, score in search_hits), default=1.0) or 1.0
+        max_pr_eval = max(pr_scores.values(), default=1.0) or 1.0
+        reranked = sorted(
+            [(item["product_id"], 0.7 * score / max_bm25_eval +
+              0.3 * pr_scores.get(item["product_id"], 0.0) / max_pr_eval)
+             for item, score in search_hits], key=lambda x: x[1], reverse=True
+        )
+        pagerank_inputs.append((eval_query, [pid for pid, _ in reranked], pseudo_ground_truth))
 
-      metrics = IREvaluator.evaluate_retrieval(
-          retrieved_pids, pseudo_ground_truth, k=k_val
-      )
-
-      st.write(f"**Evaluation Results for Query: '{eval_query}' (K={k_val})**")
-      m_df = pd.DataFrame([metrics])
-      st.dataframe(m_df, use_container_width=True)
-
-      # Comparative analysis required by Section F: lexical ranking versus
-      # PageRank-aware ranking over the same retrieved candidate set.
-      max_bm25_eval = max((score for _, score in search_hits), default=1.0) or 1.0
-      max_pr_eval = max(pr_scores.values(), default=1.0) or 1.0
-      reranked = sorted(
-          [(item["product_id"], 0.7 * score / max_bm25_eval +
-            0.3 * pr_scores.get(item["product_id"], 0.0) / max_pr_eval)
-           for item, score in search_hits], key=lambda x: x[1], reverse=True
-      )
+      bm25_detail, bm25_mean = IREvaluator.evaluate_queries(bm25_inputs, k_val)
+      pagerank_detail, pagerank_mean = IREvaluator.evaluate_queries(pagerank_inputs, k_val)
       comparison_metrics = pd.DataFrame([
-          {"ranking": "BM25", **IREvaluator.evaluate_retrieval(retrieved_pids, pseudo_ground_truth, k_val)},
-          {"ranking": "BM25 + PageRank", **IREvaluator.evaluate_retrieval([pid for pid, _ in reranked], pseudo_ground_truth, k_val)},
+          {"ranking": "BM25", **bm25_mean.iloc[0].drop("Query").to_dict()},
+          {"ranking": "BM25 + PageRank", **pagerank_mean.iloc[0].drop("Query").to_dict()},
       ])
+      st.write(f"**Evaluation Results across {len(query_lines)} queries (K={k_val})**")
+      st.caption("Relevance is defined transparently as products whose titles contain all query terms. MAP is the mean of per-query average precision values.")
+      st.subheader("Per-query BM25 results")
+      st.dataframe(bm25_detail, use_container_width=True)
+      st.subheader("Per-query BM25 + PageRank results")
+      st.dataframe(pagerank_detail, use_container_width=True)
       st.subheader("Comparative ranking analysis")
       st.dataframe(comparison_metrics, use_container_width=True)
       st.plotly_chart(px.bar(comparison_metrics, x="ranking", y=f"NDCG@{k_val}",
                              title="NDCG comparison: BM25 versus PageRank-aware ranking"), use_container_width=True)
-      st.metric("Evaluation time (seconds)", f"{time.perf_counter() - eval_started:.4f}")
+      st.metric("Evaluation time (seconds)", f"{time.perf_counter() - evaluation_started:.4f}")
 
       fig_metrics = px.bar(
-          x=list(metrics.keys()),
-          y=list(metrics.values()),
+          x=list(comparison_metrics.columns[1:]),
+          y=list(comparison_metrics.iloc[0, 1:]),
           labels={"x": "Metric", "y": "Score"},
           title=f"Retrieval Metrics Performance (K={k_val})",
       )
